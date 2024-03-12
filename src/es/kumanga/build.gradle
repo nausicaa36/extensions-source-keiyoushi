@@ -1,7 +1,11 @@
 ext {
     extName = 'Kumanga'
     extClass = '.Kumanga'
-    extVersionCode = 9
+    extVersionCode = 11
 }
 
 apply from: "$rootDir/common.gradle"
+
+dependencies {
+    implementation(project(':lib:randomua'))
+}
