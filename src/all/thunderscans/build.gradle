@@ -2,8 +2,9 @@ ext {
     extName = 'Thunder Scans'
     extClass = '.ThunderScansFactory'
     themePkg = 'mangathemesia'
-    baseUrl = 'https://thunderscans.com'
-    overrideVersionCode = 0
+    baseUrl = 'https://en-thunderscans.com'
+    overrideVersionCode = 9
+    isNsfw = false
 }
 
 apply from: "$rootDir/common.gradle"

@@ -22,7 +22,7 @@ class KissLove : FMReader("KissLove", "https://klz9.com", "ja") {
             ?.groupValues?.get(1)
             ?: throw Exception("Could not find manga id")
 
-        val xhrUrl = "$baseUrl/app/manga/controllers/cont.listChapter.php".toHttpUrl().newBuilder()
+        val xhrUrl = "$baseUrl/${generateRandomStr(25)}.lstc".toHttpUrl().newBuilder()
             .addQueryParameter("slug", mangaId)
             .build()
 
@@ -49,12 +49,12 @@ class KissLove : FMReader("KissLove", "https://klz9.com", "ja") {
         }
 
         when (date.split(' ')[dateWordIndex]) {
-            "mins", "minutes" -> chapterDate.add(Calendar.MINUTE, value * -1)
-            "hours" -> chapterDate.add(Calendar.HOUR_OF_DAY, value * -1)
-            "days" -> chapterDate.add(Calendar.DATE, value * -1)
-            "weeks" -> chapterDate.add(Calendar.DATE, value * 7 * -1)
-            "months" -> chapterDate.add(Calendar.MONTH, value * -1)
-            "years" -> chapterDate.add(Calendar.YEAR, value * -1)
+            "mins", "minutes" -> chapterDate.add(Calendar.MINUTE, -value)
+            "hours" -> chapterDate.add(Calendar.HOUR_OF_DAY, -value)
+            "days" -> chapterDate.add(Calendar.DATE, -value)
+            "weeks" -> chapterDate.add(Calendar.DATE, -value * 7)
+            "months" -> chapterDate.add(Calendar.MONTH, -value)
+            "years" -> chapterDate.add(Calendar.YEAR, -value)
             else -> return 0
         }
 
@@ -70,14 +70,19 @@ class KissLove : FMReader("KissLove", "https://klz9.com", "ja") {
             ?.`val`()
             ?: throw Exception("Could not find chapter id")
 
-        val xhrUrl = "$baseUrl/app/manga/controllers/cont.listImg.php".toHttpUrl().newBuilder()
+        val xhrUrl = "$baseUrl/${generateRandomStr(30)}.iog".toHttpUrl().newBuilder()
             .addQueryParameter("cid", chapterId)
             .build()
 
         return GET(xhrUrl, headers)
     }
 
+    private fun generateRandomStr(length: Int): String {
+        return (1..length).map { TO_PATH_CHARACTERS.random() }.joinToString("")
+    }
+
     companion object {
+        private val TO_PATH_CHARACTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
         private val MID_URL_REGEX = "-([^.]+).html".toRegex()
     }
 }

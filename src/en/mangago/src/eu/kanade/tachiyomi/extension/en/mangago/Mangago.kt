@@ -1,13 +1,22 @@
 package eu.kanade.tachiyomi.extension.en.mangago
 
+import android.app.Application
+import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Rect
 import android.util.Base64
+import androidx.preference.PreferenceScreen
+import androidx.preference.SwitchPreferenceCompat
 import app.cash.quickjs.QuickJs
+import eu.kanade.tachiyomi.lib.randomua.addRandomUAPreferenceToScreen
+import eu.kanade.tachiyomi.lib.randomua.getPrefCustomUA
+import eu.kanade.tachiyomi.lib.randomua.getPrefUAType
+import eu.kanade.tachiyomi.lib.randomua.setRandomUserAgent
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.interceptor.rateLimit
+import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.Page
@@ -22,6 +31,8 @@ import okhttp3.Request
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import uy.kohesive.injekt.Injekt
+import uy.kohesive.injekt.api.get
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.net.URLEncoder
@@ -31,7 +42,7 @@ import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
-class Mangago : ParsedHttpSource() {
+class Mangago : ParsedHttpSource(), ConfigurableSource {
 
     override val name = "Mangago"
 
@@ -41,12 +52,21 @@ class Mangago : ParsedHttpSource() {
 
     override val supportsLatest = true
 
+    private val preferences: SharedPreferences by lazy {
+        Injekt.get<Application>().getSharedPreferences("source_$id", 0x0000)
+    }
+
     override val client = network.cloudflareClient.newBuilder()
         .rateLimit(1, 2)
+        .setRandomUserAgent(
+            preferences.getPrefUAType(),
+            preferences.getPrefCustomUA(),
+        )
         .addInterceptor { chain ->
-            val response = chain.proceed(chain.request())
+            val request = chain.request()
+            val response = chain.proceed(request)
 
-            val fragment = response.request.url.fragment ?: return@addInterceptor response
+            val fragment = request.url.fragment ?: return@addInterceptor response
 
             // desckey=...&cols=...
             val key = fragment.substringAfter("desckey=").substringBefore("&")
@@ -150,11 +170,21 @@ class Mangago : ParsedHttpSource() {
 
     override fun searchMangaNextPageSelector() = genreListingNextPageSelector
 
+    private var titleRegex: Regex =
+        Regex("\\([^()]*\\)|\\{[^{}]*\\}|\\[(?:(?!]).)*]|«[^»]*»|〘[^〙]*〙|「[^」]*」|『[^』]*』|≪[^≫]*≫|﹛[^﹜]*﹜|〖[^〖〗]*〗|𖤍.+?𖤍|《[^》]*》|⌜.+?⌝|⟨[^⟩]*⟩|\\/Official|\\/ Official", RegexOption.IGNORE_CASE)
+
     override fun mangaDetailsParse(document: Document) = SManga.create().apply {
         title = document.selectFirst(".w-title h1")!!.text()
+        if (isRemoveTitleVersion()) {
+            title = title.replace(titleRegex, "").trim()
+        }
+
         document.getElementById("information")!!.let {
             thumbnail_url = it.selectFirst("img")!!.attr("abs:src")
-            description = it.selectFirst(".manga_summary")!!.text()
+            description = it.selectFirst(".manga_summary")?.let { summary ->
+                summary.selectFirst("font")?.remove()
+                summary.text()
+            }
             it.select(".manga_info li, .manga_right tr").forEach { el ->
                 when (el.selectFirst("b, label")!!.text().lowercase()) {
                     "alternative:" -> description += "\n\n${el.text()}"
@@ -175,15 +205,23 @@ class Mangago : ParsedHttpSource() {
     override fun chapterFromElement(element: Element) = SChapter.create().apply {
         val link = element.select("a.chico")
 
-        setUrlWithoutDomain(link.attr("href"))
+        val urlOriginal = link.attr("href")
+        if (urlOriginal.startsWith("http")) url = urlOriginal else setUrlWithoutDomain(urlOriginal)
         name = link.text().trim()
         date_upload = runCatching {
             dateFormat.parse(element.select("td:last-child").text().trim())?.time
         }.getOrNull() ?: 0L
         scanlator = element.selectFirst("td.no a, td.uk-table-shrink a")?.text()?.trim()
+        if (scanlator.isNullOrBlank()) {
+            scanlator = "Unknown"
+        }
     }
 
     override fun pageListParse(document: Document): List<Page> {
+        if (!document.select("div.controls ul#dropdown-menu-page").isNullOrEmpty()) {
+            return pageListParseMobile(document)
+        }
+
         val imgsrcsScript = document.selectFirst("script:containsData(imgsrcs)")?.html()
             ?: throw Exception("Could not find imgsrcs")
         val imgsrcRaw = imgSrcsRegex.find(imgsrcsScript)?.groupValues?.get(1)
@@ -206,28 +244,9 @@ class Mangago : ParsedHttpSource() {
 
         var imageList = cipher.doFinal(imgsrcs).toString(Charsets.UTF_8)
 
-        try {
-            val keyLocations = keyLocationRegex.findAll(deobfChapterJs).map {
-                it.groupValues[1].toInt()
-            }.distinct()
+        imageList = unescrambleImageList(imageList, deobfChapterJs)
 
-            val unscrambleKey = keyLocations.map {
-                imageList[it].toString().toInt()
-            }.toList()
-
-            keyLocations.forEachIndexed { idx, it ->
-                imageList = imageList.removeRange(it - idx..it - idx)
-            }
-
-            imageList = imageList.unscramble(unscrambleKey)
-        } catch (e: NumberFormatException) {
-            // Only call where it should throw is imageList[it].toString().toInt().
-            // This usually means that the list is already unscrambled.
-        }
-
-        val cols = deobfChapterJs
-            .substringAfter("var widthnum=heightnum=")
-            .substringBefore(";")
+        val cols = colsRegex.find(deobfChapterJs)?.groupValues?.get(1) ?: ""
 
         return imageList
             .split(",")
@@ -242,8 +261,63 @@ class Mangago : ParsedHttpSource() {
             }
     }
 
-    override fun imageUrlParse(document: Document): String =
-        throw UnsupportedOperationException()
+    override fun pageListRequest(chapter: SChapter): Request {
+        if (chapter.url.startsWith("http")) {
+            return GET(chapter.url, headers)
+        }
+        return super.pageListRequest(chapter)
+    }
+
+    private fun pageListParseMobile(document: Document): List<Page> {
+        val pagesCount = document.select("div.controls ul#dropdown-menu-page li").size
+        val pageUrl = document.location().removeSuffix("/").substringBeforeLast("-")
+        return IntRange(1, pagesCount).map { Page(it, url = "$pageUrl-$it/") }
+    }
+
+    private var cachedDeofChapterJS: String? = null
+    private var cachedKey: ByteArray? = null
+    private var cachedIv: ByteArray? = null
+    private var cachedTime: Long = 0
+    private val maxCacheTime = 1000 * 60 * 5 // 5 minutes
+
+    override fun imageUrlParse(document: Document): String {
+        val imgsrcsScript = document.selectFirst("script:containsData(imgsrcs)")?.html()
+            ?: throw Exception("Could not find imgsrcs")
+        val imgsrcRaw = imgSrcsRegex.find(imgsrcsScript)?.groupValues?.get(1)
+            ?: throw Exception("Could not extract imgsrcs")
+        val imgsrcs = Base64.decode(imgsrcRaw, Base64.DEFAULT)
+        val chapterJsUrl = document.getElementsByTag("script").first {
+            it.attr("src").contains("chapter.js", ignoreCase = true)
+        }.attr("abs:src")
+
+        if (cachedDeofChapterJS == null || cachedKey == null || cachedIv == null || System.currentTimeMillis() - cachedTime > maxCacheTime) {
+            val obfuscatedChapterJs = client.newCall(GET(chapterJsUrl, headers)).execute().body.string()
+            cachedDeofChapterJS = SoJsonV4Deobfuscator.decode(obfuscatedChapterJs)
+            cachedKey = findHexEncodedVariable(cachedDeofChapterJS!!, "key").decodeHex()
+            cachedIv = findHexEncodedVariable(cachedDeofChapterJS!!, "iv").decodeHex()
+            cachedTime = System.currentTimeMillis()
+        }
+
+        val cipher = Cipher.getInstance(hashCipher)
+        val keyS = SecretKeySpec(cachedKey, aes)
+        cipher.init(Cipher.DECRYPT_MODE, keyS, IvParameterSpec(cachedIv))
+
+        var imageList = cipher.doFinal(imgsrcs).toString(Charsets.UTF_8)
+
+        imageList = unescrambleImageList(imageList, cachedDeofChapterJS!!)
+
+        val cols = colsRegex.find(cachedDeofChapterJS!!)?.groupValues?.get(1) ?: ""
+
+        val pageNumber = document.location().removeSuffix("/").substringAfterLast("-").toInt()
+
+        return imageList.split(",")[pageNumber - 1].let {
+            if (it.contains("cspiclink")) {
+                "$it#desckey=${getDescramblingKey(cachedDeofChapterJS!!, it)}&cols=$cols"
+            } else {
+                it
+            }
+        }
+    }
 
     override fun getFilterList(): FilterList = FilterList(
         Filter.Header("Ignored if using text search"),
@@ -367,6 +441,29 @@ class Mangago : ParsedHttpSource() {
         return s
     }
 
+    private fun unescrambleImageList(imageList: String, js: String): String {
+        var imgList = imageList
+        try {
+            val keyLocations = keyLocationRegex.findAll(js).map {
+                it.groupValues[1].toInt()
+            }.distinct()
+
+            val unscrambleKey = keyLocations.map {
+                imgList[it].toString().toInt()
+            }.toList()
+
+            keyLocations.forEachIndexed { idx, it ->
+                imgList = imgList.removeRange(it - idx..it - idx)
+            }
+
+            imgList = imgList.unscramble(unscrambleKey)
+        } catch (e: NumberFormatException) {
+            // Only call where it should throw is imageList[it].toString().toInt().
+            // This usually means that the list is already unscrambled.
+        }
+        return imgList
+    }
+
     private fun unscrambleImage(image: InputStream, key: String, cols: Int): ByteArray {
         val bitmap = BitmapFactory.decodeStream(image)
 
@@ -450,6 +547,9 @@ class Mangago : ParsedHttpSource() {
         Regex("""var imgsrcs\s*=\s*['"]([a-zA-Z0-9+=/]+)['"]""")
     }
 
+    private val colsRegex =
+        Regex("""var\s*widthnum\s*=\s*heightnum\s*=\s*(\d+);""")
+
     private val replacePosBytecode by lazy {
         QuickJs.create().use {
             it.compile(
@@ -462,5 +562,22 @@ class Mangago : ParsedHttpSource() {
                 "?",
             )
         }
+    }
+    private fun isRemoveTitleVersion() = preferences.getBoolean(REMOVE_TITLE_VERSION_PREF, false)
+
+    override fun setupPreferenceScreen(screen: PreferenceScreen) {
+        SwitchPreferenceCompat(screen.context).apply {
+            key = REMOVE_TITLE_VERSION_PREF
+            title = "Remove version information from entry titles"
+            summary = "This removes version tags like '(Official)' or '(Yaoi)' from entry titles " +
+                "and helps identify duplicate entries in your library. " +
+                "To update existing entries, remove them from your library (unfavorite) and refresh manually. " +
+                "You might also want to clear the database in advanced settings."
+            setDefaultValue(false)
+        }.let(screen::addPreference)
+        addRandomUAPreferenceToScreen(screen)
+    }
+    companion object {
+        private const val REMOVE_TITLE_VERSION_PREF = "REMOVE_TITLE_VERSION"
     }
 }

@@ -2,8 +2,9 @@ ext {
     extName = 'MG Komik'
     extClass = '.MGKomik'
     themePkg = 'madara'
-    baseUrl = 'https://mgkomik.id'
-    overrideVersionCode = 12
+    baseUrl = 'https://mgkomik.org'
+    overrideVersionCode = 15
+    isNsfw = false
 }
 
 apply from: "$rootDir/common.gradle"

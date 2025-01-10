@@ -8,19 +8,16 @@ import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.util.Calendar
 import java.util.Locale
 
-class KomikCast : MangaThemesia("Komik Cast", "https://komikcast.lol", "id", "/daftar-komik") {
+class KomikCast : MangaThemesia("Komik Cast", "https://komikcast.bz", "id", "/daftar-komik") {
 
     // Formerly "Komik Cast (WP Manga Stream)"
     override val id = 972717448578983812
@@ -110,22 +107,22 @@ class KomikCast : MangaThemesia("Komik Cast", "https://komikcast.lol", "id", "/d
             val value = date.split(' ')[0].toInt()
             when {
                 "min" in date -> Calendar.getInstance().apply {
-                    add(Calendar.MINUTE, value * -1)
+                    add(Calendar.MINUTE, -value)
                 }.timeInMillis
                 "hour" in date -> Calendar.getInstance().apply {
-                    add(Calendar.HOUR_OF_DAY, value * -1)
+                    add(Calendar.HOUR_OF_DAY, -value)
                 }.timeInMillis
                 "day" in date -> Calendar.getInstance().apply {
-                    add(Calendar.DATE, value * -1)
+                    add(Calendar.DATE, -value)
                 }.timeInMillis
                 "week" in date -> Calendar.getInstance().apply {
-                    add(Calendar.DATE, value * 7 * -1)
+                    add(Calendar.DATE, -value * 7)
                 }.timeInMillis
                 "month" in date -> Calendar.getInstance().apply {
-                    add(Calendar.MONTH, value * -1)
+                    add(Calendar.MONTH, -value)
                 }.timeInMillis
                 "year" in date -> Calendar.getInstance().apply {
-                    add(Calendar.YEAR, value * -1)
+                    add(Calendar.YEAR, -value)
                 }.timeInMillis
                 else -> {
                     0L
@@ -141,23 +138,8 @@ class KomikCast : MangaThemesia("Komik Cast", "https://komikcast.lol", "id", "/d
     }
 
     override fun pageListParse(document: Document): List<Page> {
-        var doc = document
-        var cssQuery = "div#chapter_body .main-reading-area img"
-        val imageListRegex = Regex("chapterImages = (.*) \\|\\|")
-        val imageListMatchResult = imageListRegex.find(document.toString())
-
-        if (imageListMatchResult != null) {
-            val imageListJson = imageListMatchResult.destructured.toList()[0]
-            val imageList = json.parseToJsonElement(imageListJson).jsonObject
-
-            var imageServer = "cdn"
-            if (!imageList.containsKey(imageServer)) imageServer = imageList.keys.first()
-            val imageElement = imageList[imageServer]!!.jsonArray.joinToString("")
-            doc = Jsoup.parse(imageElement)
-            cssQuery = "img.size-full"
-        }
-
-        return doc.select(cssQuery)
+        return document.select("div#chapter_body .main-reading-area img.size-full")
+            .distinctBy { img -> img.imgAttr() }
             .mapIndexed { i, img -> Page(i, document.location(), img.imgAttr()) }
     }
 
@@ -169,9 +151,11 @@ class KomikCast : MangaThemesia("Komik Cast", "https://komikcast.lol", "id", "/d
 
         if (query.isNotEmpty()) {
             url.addPathSegments("page/$page/").addQueryParameter("s", query)
-        } else {
-            url.addPathSegment(mangaUrlDirectory.substring(1)).addPathSegments("page/$page/")
+            return GET(url.build(), headers)
         }
+
+        url.addPathSegment(mangaUrlDirectory.substring(1))
+            .addPathSegments("page/$page/")
 
         filters.forEach { filter ->
             when (filter) {
@@ -201,7 +185,7 @@ class KomikCast : MangaThemesia("Komik Cast", "https://komikcast.lol", "id", "/d
                 else -> { /* Do Nothing */ }
             }
         }
-        return GET(url.build())
+        return GET(url.build(), headers)
     }
 
     private class StatusFilter : SelectFilter(

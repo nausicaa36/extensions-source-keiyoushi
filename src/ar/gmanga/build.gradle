@@ -1,7 +1,0 @@
-ext {
-    extName = 'GMANGA'
-    extClass = '.Gmanga'
-    extVersionCode = 13
-}
-
-apply from: "$rootDir/common.gradle"

@@ -20,7 +20,7 @@ jobs:
             [
               {
                 "keywords": ["cf", "cloudflare"],
-                "message": "Refer to the **Solving Cloudflare issues** section at https://tachiyomi.org/docs/guides/troubleshooting/#cloudflare. If it doesn't work, migrate to other sources or wait until they lower their protection."
+                "message": "Refer to the **Solving Cloudflare issues** section at https://keiyoushi.github.io/docs/guides/troubleshooting#cloudflare. If it doesn't work, migrate to other sources or wait until they lower their protection."
               },
               {
                 "keywords": ["uninstall"],
@@ -40,17 +40,11 @@ jobs:
           auto-close-rules: |
             [
               {
-                "type": "body",
-                "regex": "- \\[[xX]\\] I have admitted that I am a clown by having checked this box, as I have not read these acknowledgements\\.",
-                "labels": [":clown_face:"],
-                "message": "You have not carefully read the acknowledgements. Read them again and edit the checkboxes before reopening the issue."
-              },
-              {
                 "type": "both",
                 "regex": ".*(?:fail(?:ed|ure|s)?|can\\s*(?:no|')?t|(?:not|un).*able|(?<!n[o']?t )blocked by|error) (?:to )?(?:get past|by ?pass|penetrate)?.*cl[oa]ud ?fl?[ai]re.*",
                 "ignoreCase": true,
                 "labels": ["Cloudflare protected"],
-                "message": "Refer to the **Solving Cloudflare issues** section at https://tachiyomi.org/docs/guides/troubleshooting/#cloudflare. If it doesn't work, migrate to other sources or wait until they lower their protection."
+                "message": "Refer to the **Solving Cloudflare issues** section at https://keiyoushi.github.io/docs/guides/troubleshooting#cloudflare. If it doesn't work, migrate to other sources or wait until they lower their protection."
               },
               {
                 "type": "both",
@@ -58,6 +52,20 @@ jobs:
                 "ignoreCase": true,
                 "labels": ["invalid"],
                 "message": "ReManga (Russian) will not be added back as it has been removed [due to legal reasons](https://github.com/github/dmca)."
+              },
+              {
+                "type": "both",
+                "regex": "(kumanga\\.com)",
+                "ignoreCase": true,
+                "labels": ["invalid"],
+                "message": "{match} will not be added back as it is too difficult to maintain."
+              },
+              {
+                "type": "both",
+                "regex": "(centralnovel\\.com)",
+                "ignoreCase": true,
+                "labels": ["invalid"],
+                "message": "Novels aren't supported"
               }
             ]
           auto-close-ignore-label: do-not-autoclose

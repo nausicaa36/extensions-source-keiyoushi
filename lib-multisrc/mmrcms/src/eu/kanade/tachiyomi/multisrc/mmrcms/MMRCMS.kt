@@ -67,6 +67,8 @@ constructor(
 
     override val supportsLatest = true
 
+    override val client = network.cloudflareClient
+
     override fun headersBuilder() = super.headersBuilder()
         .add("Referer", "$baseUrl/")
 
@@ -208,7 +210,7 @@ constructor(
 
     override fun searchMangaNextPageSelector(): String? = ".pagination a[rel=next]"
 
-    protected fun parseSearchDirectory(page: Int): MangasPage {
+    protected open fun parseSearchDirectory(page: Int): MangasPage {
         val manga = searchDirectory.subList((page - 1) * 24, min(page * 24, searchDirectory.size))
             .map {
                 SManga.create().apply {

@@ -1,21 +1,41 @@
 package eu.kanade.tachiyomi.extension.en.magusmanga
 
-import eu.kanade.tachiyomi.multisrc.mangathemesia.MangaThemesia
-import eu.kanade.tachiyomi.network.interceptor.rateLimit
-import java.text.SimpleDateFormat
-import java.util.Locale
-import java.util.concurrent.TimeUnit
+import eu.kanade.tachiyomi.multisrc.keyoapp.Keyoapp
+import eu.kanade.tachiyomi.network.interceptor.rateLimitHost
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Interceptor
+import okhttp3.Response
+import okio.IOException
+import org.jsoup.Jsoup
 
-class MagusManga : MangaThemesia(
+class MagusManga : Keyoapp(
     "Magus Manga",
-    "https://vofeg.com",
+    "https://magustoon.com",
     "en",
-    mangaUrlDirectory = "/series",
-    dateFormat = SimpleDateFormat("MMMMM dd, yyyy", Locale("en")),
 ) {
-    override val id = 7792477462646075400
+    override val versionId = 2
 
-    override val client = super.client.newBuilder()
-        .rateLimit(1, 1, TimeUnit.SECONDS)
+    override val client = network.cloudflareClient.newBuilder()
+        .addInterceptor(::captchaInterceptor)
+        .rateLimitHost(baseUrl.toHttpUrl(), 1)
         .build()
+
+    private fun captchaInterceptor(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        val response = chain.proceed(request)
+
+        if (response.code == 401) {
+            val document = Jsoup.parse(
+                response.peekBody(Long.MAX_VALUE).string(),
+                response.request.url.toString(),
+            )
+
+            if (document.selectFirst(".g-recaptcha") != null) {
+                response.close()
+                throw IOException("Solve Captcha in WebView")
+            }
+        }
+
+        return response
+    }
 }

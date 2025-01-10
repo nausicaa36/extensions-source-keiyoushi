@@ -1,8 +1,16 @@
 package eu.kanade.tachiyomi.extension.es.plottwistnofansub
 
+import android.app.Application
+import android.content.SharedPreferences
+import androidx.preference.PreferenceScreen
+import eu.kanade.tachiyomi.lib.randomua.addRandomUAPreferenceToScreen
+import eu.kanade.tachiyomi.lib.randomua.getPrefCustomUA
+import eu.kanade.tachiyomi.lib.randomua.getPrefUAType
+import eu.kanade.tachiyomi.lib.randomua.setRandomUserAgent
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.network.interceptor.rateLimitHost
+import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -24,13 +32,15 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.jsoup.nodes.Entities
 import org.jsoup.select.Elements
+import uy.kohesive.injekt.Injekt
+import uy.kohesive.injekt.api.get
 import uy.kohesive.injekt.injectLazy
 
-class PlotTwistNoFansub : ParsedHttpSource() {
+class PlotTwistNoFansub : ParsedHttpSource(), ConfigurableSource {
 
     override val name = "Plot Twist No Fansub"
 
-    override val baseUrl = "https://www.plotfansub.com"
+    override val baseUrl = "https://plotnf.com"
 
     override val lang = "es"
 
@@ -38,16 +48,27 @@ class PlotTwistNoFansub : ParsedHttpSource() {
 
     private val json: Json by injectLazy()
 
-    override val client: OkHttpClient = network.client.newBuilder()
+    private val preferences: SharedPreferences =
+        Injekt.get<Application>().getSharedPreferences("source_$id", 0x000)
+
+    override val client: OkHttpClient = network.cloudflareClient.newBuilder()
+        .setRandomUserAgent(
+            preferences.getPrefUAType(),
+            preferences.getPrefCustomUA(),
+        )
         .rateLimitHost(baseUrl.toHttpUrl(), 1)
         .build()
+
+    override fun setupPreferenceScreen(screen: PreferenceScreen) {
+        addRandomUAPreferenceToScreen(screen)
+    }
 
     override fun headersBuilder(): Headers.Builder = Headers.Builder()
         .add("Referer", "$baseUrl/")
 
     override fun popularMangaRequest(page: Int): Request = GET(baseUrl, headers)
 
-    override fun popularMangaSelector(): String = "div.last-updates > div.item"
+    override fun popularMangaSelector(): String = "div.item"
 
     override fun popularMangaNextPageSelector(): String? = null
 
@@ -56,7 +77,7 @@ class PlotTwistNoFansub : ParsedHttpSource() {
             val mangaUrl = selectFirst("a")!!.attr("href")
                 .removeSuffix("/")
                 .substringBeforeLast("/")
-                .replaceFirst("/reader/", "/plot/manga/")
+                .replaceFirst("/reader/", "/plotwist/manga/")
             setUrlWithoutDomain(mangaUrl)
             thumbnail_url = select("img").imgAttr()
             title = select("img").attr("title")
@@ -117,17 +138,26 @@ class PlotTwistNoFansub : ParsedHttpSource() {
 
     override fun chapterListParse(response: Response): List<SChapter> {
         val document = response.asJsoup()
-        val mangaId = document.selectFirst("div.td-ss-main-content > article[id^=post-]")!!.id().substringAfter("-")
+
+        val mangaIds = listOfNotNull(
+            MANGAID1_REGEX.find(document.html())?.groupValues?.get(1),
+            document.selectFirst("link[rel=shortlink]")?.attr("href")?.substringAfterLast("="),
+            document.selectFirst("body")?.classNames()?.filter { it.startsWith("postid-") }?.getOrNull(0)?.substringAfterLast("-"),
+            document.selectFirst(".td-post-views span")?.classNames()?.filter { it.startsWith("td-nr-views-") }?.getOrNull(0)?.substringAfterLast("-"),
+        ) + document.select("*[data-mangaid]").map { it.attr("data-mangaid") }
+
+        val mangaId = mangaIds.groupingBy { it }.eachCount().maxBy { it.value }.key
+
+        val key = getKey(document)
         val url = "$baseUrl/wp-admin/admin-ajax.php"
-        val formBody = FormBody.Builder()
-            .add("action", "lcap")
-            .add("manga_id", mangaId)
 
         var page = 1
         val chapterList = mutableListOf<SChapter>()
 
         do {
-            val body = formBody
+            val body = FormBody.Builder()
+                .add("action", key)
+                .add("manga_id", mangaId)
                 .add("pageNumber", page.toString())
                 .build()
 
@@ -158,9 +188,10 @@ class PlotTwistNoFansub : ParsedHttpSource() {
     override fun chapterFromElement(element: Element): SChapter = throw UnsupportedOperationException()
 
     override fun pageListParse(document: Document): List<Page> {
-        val script = document.selectFirst("script#clarity-reader-nav-js-extra")!!.data()
-        val pagesJson = CHAPTER_PAGES_REGEX.find(script)!!.groupValues[1]
-        val result = json.decodeFromString<PagesPayloadDto>(pagesJson)
+        val script = document.select("script")
+            .map(Element::data)
+            .firstNotNullOf(CHAPTER_PAGES_REGEX::find)
+        val result = json.decodeFromString<PagesPayloadDto>(script.groups["json"]!!.value)
         val mangaSlug = "${result.cdnUrl}/${result.mangaSlug}"
         val chapterNumber = result.chapterNumber
         return result.images.mapIndexed { i, img ->
@@ -191,9 +222,46 @@ class PlotTwistNoFansub : ParsedHttpSource() {
         return UNESCAPE_REGEX.replace(this, "$1")
     }
 
+    private fun getKey(document: Document): String {
+        val customPriorityWant = listOf("custom")
+        val customPriorityJunk = listOf("bootstrap", "pagi", "reader", "jquery")
+        val customPriorityJunk2 = listOf("multilanguage-", "ad-", "td-", "bj-", "html-", "gd-")
+
+        document.select("script[src*=\"wp-content/plugins/\"]")
+            .asSequence()
+            .map { it.attr("src") }
+            .sortedWith(
+                compareBy<String> { url ->
+                    when {
+                        customPriorityWant.any { url.contains(it) } -> 0
+                        customPriorityJunk.any { url.contains(it) } -> 2
+                        customPriorityJunk2.any { url.contains(it) } -> 3
+                        else -> 1
+                    }
+                },
+            ).forEach { url ->
+                val script = client.newCall(GET(url, headers)).execute().body.string()
+                val actions = ACTION_REGEX.findAll(script)
+                    .groupBy { it.groupValues[2] }
+                    .map { it.key to it.value.size }
+                    .sortedBy { it.second }
+                    .map { it.first }
+                    .filterNot { it == "set_readed" }
+                if (actions.size > 1) {
+                    throw Exception("Couldn't find action key, found ${actions.size}")
+                } else if (actions.size == 1) {
+                    return actions[0]
+                }
+            }
+
+        throw Exception("Couldn't find action key")
+    }
+
     companion object {
+        private val MANGAID1_REGEX = ""","manid":"(\d+)",""".toRegex()
         private val UNESCAPE_REGEX = """\\(.)""".toRegex()
-        private val CHAPTER_PAGES_REGEX = """obj\s*=\s*(.*)\s*;""".toRegex()
+        private val CHAPTER_PAGES_REGEX = """obj\s*=\s*(?<json>.*)\s*;""".toRegex()
+        private val ACTION_REGEX = """action:\s*?(['"])([^\r\n]+?)\1""".toRegex()
         private const val MAX_MANGA_RESULTS = 1000
     }
 }

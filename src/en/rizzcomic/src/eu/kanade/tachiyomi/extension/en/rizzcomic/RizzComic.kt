@@ -1,6 +1,7 @@
 package eu.kanade.tachiyomi.extension.en.rizzcomic
 
-import eu.kanade.tachiyomi.multisrc.mangathemesia.MangaThemesia
+import androidx.preference.PreferenceScreen
+import eu.kanade.tachiyomi.multisrc.mangathemesia.MangaThemesiaAlt
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.network.asObservableSuccess
@@ -9,9 +10,7 @@ import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
-import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.util.asJsoup
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
@@ -22,9 +21,9 @@ import rx.Observable
 import java.text.SimpleDateFormat
 import java.util.Locale
 
-class RizzComic : MangaThemesia(
+class RizzComic : MangaThemesiaAlt(
     "Rizz Comic",
-    "https://rizzcomic.com",
+    "https://rizzfables.com",
     "en",
     mangaUrlDirectory = "/series",
     dateFormat = SimpleDateFormat("dd MMM yyyy", Locale.ENGLISH),
@@ -32,51 +31,36 @@ class RizzComic : MangaThemesia(
 
     override val client = super.client.newBuilder()
         .rateLimit(1, 3)
+        .addInterceptor { chain ->
+            val request = chain.request()
+            val isApiRequest = request.header("X-API-Request") != null
+            val headers = request.headers.newBuilder().apply {
+                if (!isApiRequest) removeAll("X-Requested-With")
+                removeAll("X-API-Request")
+            }.build()
+            chain.proceed(request.newBuilder().headers(headers).build())
+        }
         .build()
+
+    override fun headersBuilder() = super.headersBuilder()
+        .set("X-Requested-With", randomString((1..20).random())) // For WebView
 
     private val apiHeaders by lazy {
         headersBuilder()
             .set("X-Requested-With", "XMLHttpRequest")
+            .set("X-API-Request", "1")
             .build()
     }
 
-    private var urlPrefix: String? = null
-    private var genreCache: List<Pair<String, String>> = emptyList()
-    private var attempts = 0
+    override val versionId = 2
 
-    private fun updateCache() {
-        if ((urlPrefix.isNullOrEmpty() || genreCache.isEmpty()) && attempts < 3) {
-            runCatching {
-                val document = client.newCall(GET("$baseUrl$mangaUrlDirectory", headers))
-                    .execute().use { it.asJsoup() }
+    override val slugRegex = Regex("""^(r\d+-)""")
 
-                urlPrefix = document.selectFirst(".listupd a")
-                    ?.attr("href")
-                    ?.substringAfter("$mangaUrlDirectory/")
-                    ?.substringBefore("-")
+    // don't allow disabling random part setting
+    override fun setupPreferenceScreen(screen: PreferenceScreen) = Unit
 
-                genreCache = document.selectFirst(".filter .genrez")
-                    ?.select("li")
-                    .orEmpty()
-                    .map {
-                        val name = it.select("label").text()
-                        val id = it.select("input").attr("value")
-
-                        Pair(name, id)
-                    }
-            }
-
-            attempts++
-        }
-    }
-
-    private fun getUrlPrefix(): String {
-        if (urlPrefix.isNullOrEmpty()) {
-            updateCache()
-        }
-
-        return urlPrefix ?: throw Exception("Unable to update dynamic urls")
-    }
+    override val listUrl = mangaUrlDirectory
+    override val listSelector = "div.bsx a"
 
     override fun popularMangaRequest(page: Int) = searchMangaRequest(page, "", SortFilter.POPULAR)
     override fun popularMangaParse(response: Response) = searchMangaParse(response)
@@ -103,30 +87,17 @@ class RizzComic : MangaThemesia(
     }
 
     override fun getFilterList(): FilterList {
-        val filters: MutableList<Filter<*>> = mutableListOf(
+        return FilterList(
             Filter.Header("Filters don't work with text search"),
             SortFilter(),
             StatusFilter(),
             TypeFilter(),
+            GenreFilter(),
         )
-
-        filters += if (genreCache.isEmpty()) {
-            listOf(
-                Filter.Separator(),
-                Filter.Header("Press reset to attempt to load genres"),
-            )
-        } else {
-            listOf(
-                GenreFilter(genreCache),
-            )
-        }
-
-        return FilterList(filters)
     }
 
     @Serializable
     class Comic(
-        val id: Int,
         val title: String,
         @SerialName("image_url") val cover: String? = null,
         @SerialName("long_description") val synopsis: String? = null,
@@ -150,13 +121,11 @@ class RizzComic : MangaThemesia(
     }
 
     override fun searchMangaParse(response: Response): MangasPage {
-        updateCache()
-
         val result = response.parseAs<List<Comic>>()
 
         val entries = result.map { comic ->
             SManga.create().apply {
-                url = "${comic.slug}#${comic.id}"
+                url = "$mangaUrlDirectory/${comic.slug}/"
                 title = comic.title
                 description = comic.synopsis
                 author = listOfNotNull(comic.author, comic.serialization).joinToString()
@@ -166,7 +135,7 @@ class RizzComic : MangaThemesia(
                 genre = buildList {
                     add(comic.type?.capitalize())
                     comic.genreIds?.onEach { gId ->
-                        add(genreCache.firstOrNull { it.second == gId }?.first)
+                        add(genres.firstOrNull { it.second == gId }?.first)
                     }
                 }.filterNotNull().joinToString()
                 initialized = true
@@ -180,37 +149,6 @@ class RizzComic : MangaThemesia(
         return client.newCall(mangaDetailsRequest(manga))
             .asObservableSuccess()
             .map { mangaDetailsParse(it).apply { description = manga.description } }
-    }
-
-    override fun mangaDetailsRequest(manga: SManga): Request {
-        val slug = manga.url.substringBefore("#")
-        val randomPart = getUrlPrefix()
-
-        return GET("$baseUrl/series/$randomPart-$slug", headers)
-    }
-
-    override fun getMangaUrl(manga: SManga): String {
-        val slug = manga.url.substringBefore("#")
-
-        val urlPart = urlPrefix?.let { "$it-" } ?: ""
-
-        return "$baseUrl/series/$urlPart$slug"
-    }
-
-    override fun chapterListRequest(manga: SManga) = mangaDetailsRequest(manga)
-
-    override fun chapterListParse(response: Response): List<SChapter> {
-        return super.chapterListParse(response).map { chapter ->
-            chapter.apply {
-                url = url.removeSuffix("/")
-                    .substringAfter("/")
-                    .substringAfter("-")
-            }
-        }
-    }
-
-    override fun pageListRequest(chapter: SChapter): Request {
-        return GET("$baseUrl/chapter/${getUrlPrefix()}-${chapter.url}", headers)
     }
 
     override fun imageRequest(page: Page): Request {
@@ -231,5 +169,10 @@ class RizzComic : MangaThemesia(
         } else {
             it.toString()
         }
+    }
+
+    private fun randomString(length: Int): String {
+        val charPool = ('a'..'z') + ('A'..'Z')
+        return List(length) { charPool.random() }.joinToString("")
     }
 }

@@ -34,7 +34,7 @@ class Photos18 : HttpSource(), ConfigurableSource {
     private val baseUrlWithLang get() = if (useTrad) baseUrl else "$baseUrl/zh-hans"
     private fun String.stripLang() = removePrefix("/zh-hans")
 
-    override val client = network.client.newBuilder().followRedirects(false).build()
+    override val client = network.cloudflareClient.newBuilder().followRedirects(false).build()
 
     override fun headersBuilder() = Headers.Builder().apply {
         add("Referer", baseUrl)
@@ -88,8 +88,8 @@ class Photos18 : HttpSource(), ConfigurableSource {
     override fun fetchChapterList(manga: SManga): Observable<List<SChapter>> {
         val chapter = SChapter.create().apply {
             url = manga.url
-            name = manga.title
-            chapter_number = -2f
+            name = "Gallery"
+            chapter_number = 0f
         }
         return Observable.just(listOf(chapter))
     }

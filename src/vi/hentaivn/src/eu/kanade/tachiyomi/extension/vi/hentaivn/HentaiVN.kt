@@ -43,7 +43,7 @@ class HentaiVN : ParsedHttpSource(), ConfigurableSource {
         Injekt.get<Application>().getSharedPreferences("source_$id", 0x0000)
     }
 
-    private val defaultBaseUrl = "https://hentaivn.tv"
+    private val defaultBaseUrl = "https://hentaihvn.tv"
     override val baseUrl by lazy { preferences.getString(PREF_KEY_BASE_URL, defaultBaseUrl)!! }
 
     override val name = "HentaiVN"
@@ -421,7 +421,7 @@ class HentaiVN : ParsedHttpSource(), ConfigurableSource {
     )
 
     // console.log(jQuery.makeArray($('ul.ul-search > li').map((i, e) => `Genre("${e.textContent}", "${e.children[0].value}")`)).join(',\n'))
-    // https://hentaivn.autos/forum/search-plus.php
+    // https://henvn.tv/forum/search-plus.php
     private fun getGenreList() = listOf(
         Genre("3D Hentai", "3"),
         Genre("Action", "5"),
@@ -596,7 +596,7 @@ class HentaiVN : ParsedHttpSource(), ConfigurableSource {
     )
 
     // jQuery.makeArray($('#container > div > div > div.box-box.textbox > form > ul:nth-child(8) > li').map((i, e) => `TransGroup("${e.textContent}", "${e.children[0].value}")`)).join(',\n')
-    // https://hentaivn.autos/forum/search-plus.php
+    // https://hentaihvn.tv/forum/search-plus.php
     private fun getGroupList() = arrayOf(
         TransGroup("Tất cả", "0"),
         TransGroup("Đang cập nhật", "1"),

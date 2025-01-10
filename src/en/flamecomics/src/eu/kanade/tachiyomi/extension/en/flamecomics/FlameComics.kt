@@ -1,80 +1,327 @@
 package eu.kanade.tachiyomi.extension.en.flamecomics
 
-import android.app.Application
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Rect
-import androidx.preference.PreferenceScreen
-import androidx.preference.SwitchPreferenceCompat
-import eu.kanade.tachiyomi.multisrc.mangathemesia.MangaThemesia
+import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.interceptor.rateLimit
-import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
+import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.util.asJsoup
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.json.Json
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Protocol
+import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.jsoup.nodes.Document
-import rx.Observable
-import uy.kohesive.injekt.Injekt
-import uy.kohesive.injekt.api.get
+import uy.kohesive.injekt.injectLazy
 import java.io.ByteArrayOutputStream
 
-class FlameComics :
-    MangaThemesia(
-        "Flame Comics",
-        "https://flamecomics.com",
-        "en",
-        mangaUrlDirectory = "/series",
-    ),
-    ConfigurableSource {
+class FlameComics : HttpSource() {
+    override val name = "Flame Comics"
+    override val lang = "en"
+    override val supportsLatest = true
+    override val versionId: Int = 2
+    override val baseUrl = "https://flamecomics.xyz"
+    private val cdn = "https://cdn.flamecomics.xyz"
 
-    // Flame Scans -> Flame Comics
-    override val id = 6350607071566689772
+    private val json: Json by injectLazy()
 
-    private val preferences by lazy {
-        Injekt.get<Application>().getSharedPreferences("source_$id", 0x0000)
-    }
-
-    override val client = super.client.newBuilder()
+    override val client = network.cloudflareClient.newBuilder()
         .rateLimit(2, 7)
+        .addInterceptor(::buildIdOutdatedInterceptor)
         .addInterceptor(::composedImageIntercept)
         .build()
 
-    // Split Image Fixer Start
-    private val composedSelector: String = "#readerarea div.figure_container div.composed_figure"
+    private val removeSpecialCharsregex = Regex("[^A-Za-z0-9 ]")
 
-    override fun pageListParse(document: Document): List<Page> {
-        val hasSplitImages = document
-            .select(composedSelector)
-            .firstOrNull() != null
+    private fun dataApiReqBuilder() = baseUrl.toHttpUrl().newBuilder().apply {
+        addPathSegment("_next")
+        addPathSegment("data")
+        addPathSegment(buildId)
+    }
 
-        if (!hasSplitImages) {
-            return super.pageListParse(document)
+    private fun imageApiUrlBuilder(dataUrl: String) = baseUrl.toHttpUrl().newBuilder().apply {
+        addPathSegment("_next")
+        addPathSegment("image")
+    }.build().toString() + "?url=$dataUrl"
+
+    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request =
+        GET(
+            dataApiReqBuilder().apply {
+                addPathSegment("browse.json")
+                fragment("$page&${removeSpecialCharsregex.replace(query.lowercase(), "")}")
+            }.build(),
+            headers,
+        )
+
+    override fun popularMangaRequest(page: Int): Request =
+        GET(
+            dataApiReqBuilder().apply {
+                addPathSegment("browse.json")
+                fragment("$page")
+            }.build(),
+            headers,
+        )
+
+    override fun latestUpdatesRequest(page: Int): Request = GET(
+        dataApiReqBuilder().apply {
+            addPathSegment("index.json")
+        }.build(),
+        headers,
+    )
+
+    override fun searchMangaParse(response: Response): MangasPage =
+        mangaParse(response) { seriesList ->
+            val query = response.request.url.fragment!!.split("&")[1]
+            seriesList.filter { series ->
+                val titles = mutableListOf(series.title)
+                if (series.altTitles != null) {
+                    titles += json.decodeFromString<List<String>>(series.altTitles)
+                }
+                titles.any { title ->
+                    removeSpecialCharsregex.replace(
+                        query.lowercase(),
+                        "",
+                    ) in removeSpecialCharsregex.replace(
+                        title.lowercase(),
+                        "",
+                    )
+                }
+            }
         }
 
-        return document.select("#readerarea p:has(img), $composedSelector").toList()
-            .filter {
-                it.select("img").all { imgEl ->
-                    imgEl.attr("abs:src").isNullOrEmpty().not()
+    override fun latestUpdatesParse(response: Response): MangasPage {
+        val latestData = json.decodeFromString<LatestPageData>(response.body.string())
+        return MangasPage(
+            latestData.pageProps.latestEntries.blocks[0].series.map { seriesData ->
+                SManga.create().apply {
+                    title = seriesData.title
+                    setUrlWithoutDomain(
+                        baseUrl.toHttpUrl().newBuilder().apply {
+                            addPathSegment("series")
+                            addPathSegment(seriesData.series_id.toString())
+                        }.build().toString(),
+                    )
+                    thumbnail_url = imageApiUrlBuilder(
+                        cdn.toHttpUrl().newBuilder().apply {
+                            addPathSegment("series")
+                            addPathSegment(seriesData.series_id.toString())
+                            addPathSegment(seriesData.cover)
+                        }.build()
+                            .toString() + "&w=640&q=75", // for some reason they don`t include the ?
+                    )
                 }
-            }
-            .mapIndexed { i, el ->
-                if (el.tagName() == "p") {
-                    Page(i, "", el.select("img").attr("abs:src"))
-                } else {
-                    val imageUrls = el.select("img")
-                        .joinToString("|") { it.attr("abs:src") }
+            },
+            false,
+        )
+    }
 
-                    Page(i, document.location(), imageUrls + COMPOSED_SUFFIX)
+    override fun popularMangaParse(response: Response): MangasPage =
+        mangaParse(response) { list -> list.sortedByDescending { it.views } }
+
+    private fun mangaParse(
+        response: Response,
+        transform: (List<Series>) -> List<Series>,
+    ): MangasPage {
+        val searchedSeriesData =
+            json.decodeFromString<SearchPageData>(response.body.string()).pageProps.series
+
+        val page = if (!response.request.url.fragment?.contains("&")!!) {
+            response.request.url.fragment!!.toInt()
+        } else {
+            response.request.url.fragment!!.split("&")[0].toInt()
+        }
+
+        val manga = transform(searchedSeriesData).map { seriesData ->
+            SManga.create().apply {
+                title = seriesData.title
+                setUrlWithoutDomain(
+                    baseUrl.toHttpUrl().newBuilder().apply {
+                        addPathSegment("series")
+                        addPathSegment(seriesData.series_id.toString())
+                    }.build().toString(),
+                )
+                thumbnail_url = imageApiUrlBuilder(
+                    cdn.toHttpUrl().newBuilder().apply {
+                        addPathSegment("series")
+                        addPathSegment(seriesData.series_id.toString())
+                        addPathSegment(seriesData.cover)
+                    }.build()
+                        .toString() + "&w=640&q=75", // for some reason they don`t include the ?
+                )
+            }
+        }
+
+        val itemsPerPage = 20
+        val startIndex = (page - 1) * itemsPerPage
+        val endIndex = minOf(page * itemsPerPage, manga.size)
+        return MangasPage(manga.subList(startIndex, endIndex), endIndex < manga.size)
+    }
+
+    override fun mangaDetailsRequest(manga: SManga): Request = GET(
+        dataApiReqBuilder().apply {
+            val seriesID =
+                ("$baseUrl${manga.url}").toHttpUrl().pathSegments.last()
+            addPathSegment("series")
+            addPathSegment("$seriesID.json")
+            addQueryParameter("id", seriesID)
+        }.build(),
+        headers,
+    )
+
+    override fun chapterListRequest(manga: SManga): Request = mangaDetailsRequest(manga)
+
+    override fun getMangaUrl(manga: SManga): String = "$baseUrl${manga.url}"
+
+    override fun mangaDetailsParse(response: Response): SManga = SManga.create().apply {
+        val seriesData =
+            json.decodeFromString<MangaPageData>(response.body.string()).pageProps.series
+        title = seriesData.title
+        thumbnail_url = imageApiUrlBuilder(
+            cdn.toHttpUrl().newBuilder().apply {
+                addPathSegment("series")
+                addPathSegment(seriesData.series_id.toString())
+                addPathSegment(seriesData.cover)
+            }.build().toString() + "&w=640&q=75",
+        )
+        description = seriesData.description
+
+        genre = seriesData.tags?.let { tags ->
+            (listOf(seriesData.type) + tags).joinToString()
+        } ?: seriesData.type
+
+        author = seriesData.author
+        status = when (seriesData.status.lowercase()) {
+            "ongoing" -> SManga.ONGOING
+            "dropped" -> SManga.CANCELLED
+            "hiatus" -> SManga.ON_HIATUS
+            "completed" -> SManga.COMPLETED
+            else -> SManga.UNKNOWN
+        }
+    }
+
+    override fun chapterListParse(response: Response): List<SChapter> {
+        val mangaPageData = json.decodeFromString<MangaPageData>(response.body.string())
+        return mangaPageData.pageProps.chapters.map { chapter ->
+            SChapter.create().apply {
+                setUrlWithoutDomain(
+                    baseUrl.toHttpUrl().newBuilder().apply {
+                        addPathSegment("series")
+                        addPathSegment(chapter.series_id.toString())
+                        addPathSegment(chapter.token)
+                    }.build().toString(),
+                )
+                chapter_number = chapter.chapter.toFloat()
+                date_upload = chapter.release_date * 1000
+                name = buildString {
+                    append("Chapter ${chapter.chapter.toString().removeSuffix(".0")} ")
+                    append(chapter.title ?: "")
                 }
             }
+        }
+    }
+
+    override fun pageListRequest(chapter: SChapter): Request = GET(
+        dataApiReqBuilder().apply {
+            val seriesID = ("$baseUrl${chapter.url}").toHttpUrl().pathSegments[1]
+            val token = ("$baseUrl${chapter.url}").toHttpUrl().pathSegments[2]
+            addPathSegment("series")
+            addPathSegment(seriesID)
+            addPathSegment("$token.json")
+            addQueryParameter("id", seriesID)
+            addQueryParameter("token", token)
+        }.build(),
+        headers,
+    )
+
+    override fun getChapterUrl(chapter: SChapter): String = "$baseUrl${chapter.url}"
+
+    override fun pageListParse(response: Response): List<Page> {
+        val chapter =
+            json.decodeFromString<ChapterPageData>(response.body.string()).pageProps.chapter
+        return chapter.images.mapIndexed { idx, page ->
+            Page(
+                idx,
+                imageUrl = imageApiUrlBuilder(
+                    cdn.toHttpUrl().newBuilder().apply {
+                        addPathSegment("series")
+                        addPathSegment(chapter.series_id.toString())
+                        addPathSegment(chapter.token)
+                        addPathSegment(page.name)
+                        addQueryParameter(
+                            chapter.release_date.toString(),
+                            value = null,
+                        )
+                        addQueryParameter("w", "1920")
+                        addQueryParameter("q", "100")
+                    }.build().toString(),
+                ),
+            )
+        }
+    }
+
+    override fun imageUrlParse(response: Response): String = ""
+
+    private fun fetchBuildId(document: Document? = null): String {
+        val realDocument = document
+            ?: client.newCall(GET(baseUrl, headers)).execute().use { it.asJsoup() }
+
+        val nextData = realDocument.selectFirst("script#__NEXT_DATA__")?.data()
+            ?: throw Exception("Failed to find __NEXT_DATA__")
+
+        val dto = json.decodeFromString<NewBuildID>(nextData)
+        return dto.buildId
+    }
+
+    private var buildId = ""
+        get() {
+            if (field == "") {
+                field = fetchBuildId()
+            }
+            return field
+        }
+
+    private fun buildIdOutdatedInterceptor(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        val response = chain.proceed(request)
+
+        if (
+            response.code == 404 &&
+            request.url.run {
+                host == baseUrl.removePrefix("https://") &&
+                    pathSegments.getOrNull(0) == "_next" &&
+                    pathSegments.getOrNull(1) == "data" &&
+                    fragment != "DO_NOT_RETRY"
+            } &&
+            response.header("Content-Type")?.contains("text/html") != false
+        ) {
+            // The 404 page should have the current buildId
+            val document = response.asJsoup()
+            buildId = fetchBuildId(document)
+
+            // Redo request with new buildId
+            val url = request.url.newBuilder()
+                .setPathSegment(2, buildId)
+                .fragment("DO_NOT_RETRY")
+                .build()
+            val newRequest = request.newBuilder()
+                .url(url)
+                .build()
+
+            return chain.proceed(newRequest)
+        }
+
+        return response
     }
 
     private fun composedImageIntercept(chain: Interceptor.Chain): Response {
@@ -130,114 +377,8 @@ class FlameComics :
     }
     // Split Image Fixer End
 
-    // Permanent Url start
-    override fun fetchPopularManga(page: Int): Observable<MangasPage> {
-        return super.fetchPopularManga(page).tempUrlToPermIfNeeded()
-    }
-
-    override fun fetchLatestUpdates(page: Int): Observable<MangasPage> {
-        return super.fetchLatestUpdates(page).tempUrlToPermIfNeeded()
-    }
-
-    override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> {
-        return super.fetchSearchManga(page, query, filters).tempUrlToPermIfNeeded()
-    }
-
-    private fun Observable<MangasPage>.tempUrlToPermIfNeeded(): Observable<MangasPage> {
-        return this.map { mangasPage ->
-            MangasPage(
-                mangasPage.mangas.map { it.tempUrlToPermIfNeeded() },
-                mangasPage.hasNextPage,
-            )
-        }
-    }
-
-    private fun SManga.tempUrlToPermIfNeeded(): SManga {
-        val turnTempUrlToPerm = preferences.getBoolean(getPermanentMangaUrlPreferenceKey(), true)
-        if (!turnTempUrlToPerm) return this
-
-        val path = this.url.removePrefix("/").removeSuffix("/").split("/")
-        path.lastOrNull()?.let { slug -> this.url = "$mangaUrlDirectory/${deobfuscateSlug(slug)}/" }
-
-        return this
-    }
-
-    override fun fetchChapterList(manga: SManga) = super.fetchChapterList(manga.tempUrlToPermIfNeeded())
-        .map { sChapterList -> sChapterList.map { it.tempUrlToPermIfNeeded() } }
-
-    private fun SChapter.tempUrlToPermIfNeeded(): SChapter {
-        val turnTempUrlToPerm = preferences.getBoolean(getPermanentChapterUrlPreferenceKey(), true)
-        if (!turnTempUrlToPerm) return this
-
-        val path = this.url.removePrefix("/").removeSuffix("/").split("/")
-        path.lastOrNull()?.let { slug -> this.url = "/${deobfuscateSlug(slug)}/" }
-        return this
-    }
-
-    override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        val permanentMangaUrlPref = SwitchPreferenceCompat(screen.context).apply {
-            key = getPermanentMangaUrlPreferenceKey()
-            title = PREF_PERM_MANGA_URL_TITLE
-            summary = PREF_PERM_MANGA_URL_SUMMARY
-            setDefaultValue(true)
-
-            setOnPreferenceChangeListener { _, newValue ->
-                val checkValue = newValue as Boolean
-                preferences.edit()
-                    .putBoolean(getPermanentMangaUrlPreferenceKey(), checkValue)
-                    .commit()
-            }
-        }
-        val permanentChapterUrlPref = SwitchPreferenceCompat(screen.context).apply {
-            key = getPermanentChapterUrlPreferenceKey()
-            title = PREF_PERM_CHAPTER_URL_TITLE
-            summary = PREF_PERM_CHAPTER_URL_SUMMARY
-            setDefaultValue(true)
-
-            setOnPreferenceChangeListener { _, newValue ->
-                val checkValue = newValue as Boolean
-                preferences.edit()
-                    .putBoolean(getPermanentChapterUrlPreferenceKey(), checkValue)
-                    .commit()
-            }
-        }
-        screen.addPreference(permanentMangaUrlPref)
-        screen.addPreference(permanentChapterUrlPref)
-    }
-
-    private fun getPermanentMangaUrlPreferenceKey(): String {
-        return PREF_PERM_MANGA_URL_KEY_PREFIX + lang
-    }
-
-    private fun getPermanentChapterUrlPreferenceKey(): String {
-        return PREF_PERM_CHAPTER_URL_KEY_PREFIX + lang
-    }
-    // Permanent Url for Manga/Chapter End
-
     companion object {
         private const val COMPOSED_SUFFIX = "?comp"
-
-        private const val PREF_PERM_MANGA_URL_KEY_PREFIX = "pref_permanent_manga_url_"
-        private const val PREF_PERM_MANGA_URL_TITLE = "Permanent Manga URL"
-        private const val PREF_PERM_MANGA_URL_SUMMARY = "Turns all manga urls into permanent ones."
-
-        private const val PREF_PERM_CHAPTER_URL_KEY_PREFIX = "pref_permanent_chapter_url"
-        private const val PREF_PERM_CHAPTER_URL_TITLE = "Permanent Chapter URL"
-        private const val PREF_PERM_CHAPTER_URL_SUMMARY = "Turns all chapter urls into permanent ones."
-
-        /**
-         *
-         * De-obfuscates the slug of a series or chapter to the permanent slug
-         *   * For a series: "12345678-this-is-a-series" -> "this-is-a-series"
-         *   * For a chapter: "12345678-this-is-a-series-chapter-1" -> "this-is-a-series-chapter-1"
-         *
-         * @param obfuscated_slug the obfuscated slug of a series or chapter
-         *
-         * @return
-         */
-        private fun deobfuscateSlug(obfuscated_slug: String) = obfuscated_slug
-            .replaceFirst(Regex("""^\d+-"""), "")
-
         private val MEDIA_TYPE = "image/png".toMediaType()
     }
 }

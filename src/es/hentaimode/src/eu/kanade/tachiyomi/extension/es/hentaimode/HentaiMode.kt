@@ -28,14 +28,14 @@ class HentaiMode : ParsedHttpSource() {
 
     override val supportsLatest = false
 
-    override val client = network.client.newBuilder()
+    override val client = network.cloudflareClient.newBuilder()
         .rateLimitHost(baseUrl.toHttpUrl(), 2)
         .build()
 
     // ============================== Popular ===============================
     override fun popularMangaRequest(page: Int) = GET(baseUrl, headers)
 
-    override fun popularMangaSelector() = "div.row div.book-list > a"
+    override fun popularMangaSelector() = "div.row div[class*=\"book-list\"] > a"
 
     override fun popularMangaFromElement(element: Element) = SManga.create().apply {
         setUrlWithoutDomain(element.absUrl("href"))

@@ -21,6 +21,7 @@ import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okio.Buffer
+import rx.Observable
 import uy.kohesive.injekt.injectLazy
 import java.util.concurrent.TimeUnit
 
@@ -28,7 +29,7 @@ class YugenMangas : HttpSource() {
 
     override val name = "Yugen Mangás"
 
-    override val baseUrl = "https://yugenmangas.net.br"
+    override val baseUrl = "https://yugenmangasbr.voblog.xyz"
 
     override val lang = "pt-BR"
 
@@ -37,6 +38,8 @@ class YugenMangas : HttpSource() {
     override val client: OkHttpClient = network.cloudflareClient.newBuilder()
         .rateLimit(1, 2, TimeUnit.SECONDS)
         .build()
+
+    override val versionId = 2
 
     private val json: Json by injectLazy()
 
@@ -49,87 +52,92 @@ class YugenMangas : HttpSource() {
         .add("Accept", "application/json, text/plain, */*")
         .add("Origin", baseUrl)
         .add("Sec-Fetch-Dest", "empty")
-        .add("Sec-Fetch-Mode", "cors")
+        .add("Sec-Fetch-Mode", "no-cors")
         .add("Sec-Fetch-Site", "same-site")
 
     override fun popularMangaRequest(page: Int): Request {
-        return GET("$API_BASE_URL/random_top_series/", apiHeaders)
+        val url = "$BASE_API/widgets/sort_and_filter/".toHttpUrl().newBuilder()
+            .addQueryParameter("page", "$page")
+            .addQueryParameter("sort", "views")
+            .addQueryParameter("order", "desc")
+            .build()
+
+        return GET(url, apiHeaders)
     }
 
     override fun popularMangaParse(response: Response): MangasPage {
-        val result = response.parseAs<List<YugenMangaDto>>()
-        val mangaList = result.map { it.toSManga(baseUrl) }
-
-        return MangasPage(mangaList, hasNextPage = false)
+        val dto = response.parseAs<PageDto<MangaDto>>()
+        val mangaList = dto.results.map { it.toSManga() }
+        return MangasPage(mangaList, hasNextPage = dto.hasNext())
     }
 
     override fun latestUpdatesRequest(page: Int): Request {
-        return GET("$API_BASE_URL/latest_updates/", apiHeaders)
+        return GET("$BASE_API/widgets/home/updates/", apiHeaders)
     }
 
-    override fun latestUpdatesParse(response: Response) = popularMangaParse(response)
+    override fun latestUpdatesParse(response: Response): MangasPage {
+        val dto = response.parseAs<LatestUpdatesDto>()
+        val mangaList = dto.series.map { it.toSManga() }
+        return MangasPage(mangaList, hasNextPage = false)
+    }
 
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        val apiUrl = "$API_BASE_URL/series/list".toHttpUrl().newBuilder()
-            .addQueryParameter("query", query)
-            .build()
-
-        return GET(apiUrl, apiHeaders)
+        val payload = json.encodeToString(SearchDto(query)).toRequestBody(JSON_MEDIA_TYPE)
+        return POST("$BASE_API/widgets/search/", apiHeaders, payload)
     }
 
-    override fun searchMangaParse(response: Response) = popularMangaParse(response)
+    override fun searchMangaParse(response: Response) = latestUpdatesParse(response)
 
     override fun mangaDetailsRequest(manga: SManga): Request {
-        val slug = manga.url.removePrefix("/series/")
-
-        return POST("$API_BASE_URL/serie_details/$slug", apiHeaders)
+        val code = manga.url.substringAfterLast("/")
+        val payload = json.encodeToString(SeriesDto(code)).toRequestBody(JSON_MEDIA_TYPE)
+        return POST("$BASE_API/series/detail/series/", apiHeaders, payload)
     }
 
     override fun getMangaUrl(manga: SManga) = baseUrl + manga.url
 
     override fun mangaDetailsParse(response: Response): SManga {
-        return response.parseAs<YugenMangaDto>().toSManga(baseUrl)
+        return response.parseAs<MangaDetailsDto>().toSManga()
     }
 
-    override fun chapterListRequest(manga: SManga): Request {
-        val slug = manga.url.removePrefix("/series/")
-        val body = YugenGetChaptersBySeriesDto(slug)
-        val payload = json.encodeToString(body).toRequestBody(JSON_MEDIA_TYPE)
+    private fun chapterListRequest(manga: SManga, page: Int): Request {
+        val code = manga.url.substringAfterLast("/")
+        val payload = json.encodeToString(SeriesDto(code)).toRequestBody(JSON_MEDIA_TYPE)
+        return POST("$BASE_API/series/chapters/get-series-chapters/?page=$page", apiHeaders, payload)
+    }
 
-        val newHeaders = apiHeadersBuilder()
-            .set("Content-Length", payload.contentLength().toString())
-            .set("Content-Type", payload.contentType().toString())
-            .build()
+    override fun fetchChapterList(manga: SManga): Observable<List<SChapter>> {
+        var page = 1
+        val chapters = mutableListOf<SChapter>()
+        do {
+            val response = client.newCall(chapterListRequest(manga, page++)).execute()
+            val series = response.getSeriesCode()
+            val chapterContainer = response.parseAs<ChapterContainerDto>()
+            chapters += chapterContainer.toSChapter(series.code)
+        } while (chapterContainer.next != null)
 
-        return POST("$API_BASE_URL/get_chapters_by_serie/", newHeaders, payload)
+        return Observable.just(chapters)
+    }
+
+    private fun Response.getSeriesCode(): SeriesDto =
+        this.request.body!!.parseAs<SeriesDto>()
+
+    override fun pageListRequest(chapter: SChapter): Request {
+        val code = chapter.url.substringAfterLast("/")
+        val payload = json.encodeToString(SeriesDto(code)).toRequestBody(JSON_MEDIA_TYPE)
+        return POST("$BASE_API/chapters/chapter-info/", apiHeaders, payload)
     }
 
     override fun chapterListParse(response: Response): List<SChapter> {
-        val (seriesSlug) = response.request.body!!.parseAs<YugenGetChaptersBySeriesDto>()
-
-        return response.parseAs<YugenChapterListDto>().chapters
-            .map { it.toSChapter(seriesSlug) }
-            .sortedByDescending(SChapter::chapter_number)
+        val series = response.request.body!!.parseAs<SeriesDto>()
+        return response.parseAs<ChapterContainerDto>().toSChapter(series.code)
     }
 
     override fun getChapterUrl(chapter: SChapter) = baseUrl + chapter.url
 
-    override fun pageListRequest(chapter: SChapter): Request {
-        val paths = chapter.url.removePrefix("/").split("/")
-
-        val newHeaders = apiHeadersBuilder()
-            .set("Referer", getChapterUrl(chapter))
-            .build()
-
-        return POST("$API_BASE_URL/serie/${paths[1]}/chapter/${paths[2]}/images/imgs/", newHeaders)
-    }
-
     override fun pageListParse(response: Response): List<Page> {
-        val result = response.parseAs<YugenReaderDto>()
-        val chapterUrl = response.request.headers["Referer"].orEmpty()
-
-        return result.images.orEmpty().mapIndexed { index, image ->
-            Page(index, chapterUrl, "$baseUrl/${image.removePrefix("/")}")
+        return response.parseAs<PageListDto>().images.mapIndexed { index, imageUrl ->
+            Page(index, baseUrl, "$BASE_MEDIA/$imageUrl")
         }
     }
 
@@ -153,7 +161,8 @@ class YugenMangas : HttpSource() {
     }
 
     companion object {
-        private const val API_BASE_URL = "https://api.yugenmangas.net.br/api"
+        private const val BASE_API = "https://api.yugenweb.com/api"
+        private const val BASE_MEDIA = "https://media.yugenweb.com"
         private val JSON_MEDIA_TYPE = "application/json".toMediaType()
     }
 }

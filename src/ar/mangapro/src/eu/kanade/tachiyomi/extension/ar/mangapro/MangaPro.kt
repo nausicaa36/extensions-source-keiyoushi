@@ -1,14 +1,11 @@
 package eu.kanade.tachiyomi.extension.ar.mangapro
 
-import eu.kanade.tachiyomi.multisrc.mangathemesia.MangaThemesia
-import java.text.SimpleDateFormat
-import java.util.Locale
+import eu.kanade.tachiyomi.multisrc.iken.Iken
 
-class MangaPro : MangaThemesia(
+class MangaPro : Iken(
     "Manga Pro",
-    "https://mangapro.pro",
     "ar",
-    dateFormat = SimpleDateFormat("MMMM dd, yyyy", Locale("ar")),
+    "https://promanga.pro",
 ) {
-    override val versionId = 3
+    override val versionId = 4
 }

@@ -1,27 +1,34 @@
 package eu.kanade.tachiyomi.extension.es.traduccionesmoonlight
 
-import eu.kanade.tachiyomi.multisrc.mangathemesia.MangaThemesia
-import eu.kanade.tachiyomi.network.interceptor.rateLimitHost
-import okhttp3.HttpUrl.Companion.toHttpUrl
-import java.text.SimpleDateFormat
-import java.util.Locale
+import eu.kanade.tachiyomi.multisrc.mangaesp.MangaEsp
+import eu.kanade.tachiyomi.network.POST
+import eu.kanade.tachiyomi.source.model.Page
+import eu.kanade.tachiyomi.util.asJsoup
+import okhttp3.FormBody
+import okhttp3.Response
 
-class TraduccionesMoonlight : MangaThemesia(
+class TraduccionesMoonlight : MangaEsp(
     "Traducciones Moonlight",
     "https://traduccionesmoonlight.com",
     "es",
-    dateFormat = SimpleDateFormat("MMMM d, yyyy", Locale("es")),
 ) {
-    // Site moved from Madara to MangaThemesia
-    override val versionId = 2
+    // Mangathemesia -> MangaEsp
+    override val versionId = 3
 
-    override val client = super.client.newBuilder()
-        .rateLimitHost(baseUrl.toHttpUrl(), 2, 1)
-        .build()
-
-    override val seriesAuthorSelector = ".tsinfo .imptdt:contains(autor) i"
-    override val seriesStatusSelector = ".tsinfo .imptdt:contains(estado) i"
-
-    // Filter out novels
-    override fun searchMangaSelector() = ".utao .uta .imgu:not(:has(.novelabel)), .listupd .bs .bsx:not(:has(.novelabel)), .listo .bs .bsx:not(:has(.novelabel))"
+    override fun pageListParse(response: Response): List<Page> {
+        var doc = response.asJsoup()
+        val form = doc.selectFirst("body > form[method=post]")
+        if (form != null) {
+            val url = form.attr("action")
+            val headers = headersBuilder().set("Referer", doc.location()).build()
+            val body = FormBody.Builder()
+            form.select("input").forEach {
+                body.add(it.attr("name"), it.attr("value"))
+            }
+            doc = client.newCall(POST(url, headers, body.build())).execute().asJsoup()
+        }
+        return doc.select("main.contenedor.read img, main > img[src]").mapIndexed { i, element ->
+            Page(i, imageUrl = element.attr("abs:src"))
+        }
+    }
 }

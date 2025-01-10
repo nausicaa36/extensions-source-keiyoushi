@@ -53,13 +53,20 @@ abstract class GroupLe(
                     .contains("internal/redirect") or (response.code == 301)
                 )
             ) {
-                throw IOException("Ссылка на мангу была изменена. Перемигрируйте мангу на тот же (или смежный с GroupLe) источник или передобавьте из Поисковика/Каталога.")
+                if (originalRequest.url.toString().contains("/list?")) {
+                    throw IOException("Смените домен: Поисковик > Расширения > $name > ⚙\uFE0F")
+                }
+                throw IOException(
+                    "URL серии изменился. Перенесите/мигрируйте с $name " +
+                        "на $name (или смежный с GroupLe), чтобы список глав обновился",
+                )
             }
             response
         }
         .build()
 
-    private var uagent: String = preferences.getString(UAGENT_TITLE, UAGENT_DEFAULT)!!
+    private var uagent = preferences.getString(UAGENT_TITLE, UAGENT_DEFAULT)!!
+
     override fun headersBuilder() = Headers.Builder().apply {
         add("User-Agent", uagent)
         add("Referer", baseUrl)
@@ -170,17 +177,18 @@ abstract class GroupLe(
             "div#tab-description  .manga-description",
         ).text()
         manga.status = when {
-            infoElement.html()
-                .contains("Запрещена публикация произведения по копирайту") || infoElement.html()
-                .contains("ЗАПРЕЩЕНА К ПУБЛИКАЦИИ НА ТЕРРИТОРИИ РФ!") -> SManga.LICENSED
-            infoElement.html().contains("<b>Сингл</b>") -> SManga.COMPLETED
+            (
+                document.html()
+                    .contains("Запрещена публикация произведения по копирайту") || document.html()
+                    .contains("ЗАПРЕЩЕНА К ПУБЛИКАЦИИ НА ТЕРРИТОРИИ РФ!")
+                ) && document.select("div.chapters").isEmpty() -> SManga.LICENSED
+            infoElement.html().contains("<b>Сингл") -> SManga.COMPLETED
             else ->
-                when (infoElement.select("p:contains(Перевод:) span").first()?.text()) {
-                    "продолжается" -> SManga.ONGOING
-                    "начат" -> SManga.ONGOING
-                    "переведено" -> SManga.COMPLETED
-                    "завершён" -> SManga.COMPLETED
-                    "приостановлен" -> SManga.ON_HIATUS
+                when (infoElement.selectFirst("span.badge:contains(выпуск)")?.text()) {
+                    "выпуск продолжается" -> SManga.ONGOING
+                    "выпуск начат" -> SManga.ONGOING
+                    "выпуск завершён" -> if (infoElement.selectFirst("span.badge:contains(переведено)")?.text()?.isNotEmpty() == true) SManga.COMPLETED else SManga.PUBLISHING_FINISHED
+                    "выпуск приостановлен" -> SManga.ON_HIATUS
                     else -> SManga.UNKNOWN
                 }
         }
@@ -200,28 +208,38 @@ abstract class GroupLe(
         }
     }
 
+    protected open fun getChapterSearchParams(document: Document): String {
+        return "?mtr=true"
+    }
+
     private fun chapterListParse(response: Response, manga: SManga): List<SChapter> {
         val document = response.asJsoup()
-        if ((document.select(".expandable.hide-dn").isNotEmpty() && document.select(".user-avatar").isNullOrEmpty() && document.toString().contains("current_user_country_code = 'RU'")) || (document.select("img.logo").first()?.attr("title")?.contains("Allhentai") == true && document.select(".user-avatar").isNullOrEmpty())) {
+
+        if (document.select(".user-avatar").isEmpty() &&
+            document.title().run { contains("AllHentai") || contains("MintManga") || contains("МинтМанга") }
+        ) {
             throw Exception("Для просмотра контента необходима авторизация через WebView\uD83C\uDF0E")
         }
-        return document.select(chapterListSelector()).map { chapterFromElement(it, manga) }
+
+        val chapterSearchParams = getChapterSearchParams(document)
+
+        return document.select(chapterListSelector()).map { chapterFromElement(it, manga, chapterSearchParams) }
     }
 
     override fun chapterListSelector() =
         "tr.item-row:has(td > a):has(td.date:not(.text-info))"
 
-    private fun chapterFromElement(element: Element, manga: SManga): SChapter {
+    private fun chapterFromElement(element: Element, manga: SManga, chapterSearchParams: String): SChapter {
         val urlElement = element.select("a.chapter-link").first()!!
         val chapterInf = element.select("td.item-title").first()!!
         val urlText = urlElement.text()
 
         val chapter = SChapter.create()
-        chapter.setUrlWithoutDomain(urlElement.attr("href") + "?mtr=true") // mtr is 18+ fractional skip
+        chapter.setUrlWithoutDomain(urlElement.attr("href") + chapterSearchParams)
 
         val translatorElement = urlElement.attr("title")
 
-        chapter.scanlator = if (!translatorElement.isNullOrBlank()) {
+        chapter.scanlator = if (translatorElement.isNotBlank()) {
             translatorElement
                 .replace("(Переводчик),", "&")
                 .removeSuffix(" (Переводчик)")
@@ -245,10 +263,14 @@ abstract class GroupLe(
         chapter.chapter_number = chapterInf.attr("data-num").toFloat() / 10
 
         chapter.date_upload = element.select("td.d-none").last()?.text()?.let {
-            try {
-                SimpleDateFormat("dd.MM.yy", Locale.US).parse(it)?.time ?: 0L
-            } catch (e: ParseException) {
-                SimpleDateFormat("dd/MM/yy", Locale.US).parse(it)?.time ?: 0L
+            if (it.isEmpty()) {
+                0L
+            } else {
+                try {
+                    SimpleDateFormat("dd.MM.yy", Locale.US).parse(it)?.time ?: 0L
+                } catch (e: ParseException) {
+                    SimpleDateFormat("dd/MM/yy", Locale.US).parse(it)?.time ?: 0L
+                }
             }
         } ?: 0
         return chapter
@@ -286,19 +308,21 @@ abstract class GroupLe(
 
         val html = document.html()
 
-        var readerMark = "rm_h.readerDoInit(["
+        if (document.select(".user-avatar").isEmpty() &&
+            document.title().run { contains("AllHentai") || contains("MintManga") || contains("МинтМанга") }
 
-        // allhentai necessary
-        if (!html.contains(readerMark)) {
-            readerMark = "rm_h.readerInit( 0,["
+        ) {
+            throw Exception("Для просмотра контента необходима авторизация через WebView\uD83C\uDF0E")
         }
 
-        if (!html.contains(readerMark)) {
-            if (document.select(".input-lg").isNotEmpty() || (document.select(".user-avatar").isNullOrEmpty() && document.select("img.logo").first()?.attr("title")?.contains("Allhentai") == true)) {
-                throw Exception("Для просмотра контента необходима авторизация через WebView\uD83C\uDF0E")
-            }
-            if (!response.request.url.toString().contains(baseUrl)) {
+        val readerMark = when {
+            html.contains("rm_h.readerDoInit([") -> "rm_h.readerDoInit(["
+            html.contains("rm_h.readerInit([") -> "rm_h.readerInit(["
+            !response.request.url.toString().contains(baseUrl) -> {
                 throw Exception("Не удалось загрузить главу. Url: ${response.request.url}")
+            }
+            else -> {
+                throw Exception("Дизайн сайта обновлен, для дальнейшей работы необходимо обновление дополнения")
             }
         }
 

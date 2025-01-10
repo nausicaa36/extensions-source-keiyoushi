@@ -1,9 +1,9 @@
 ext {
-    extName = 'Infernal Void Scans'
-    extClass = '.InfernalVoidScans'
-    themePkg = 'mangathemesia'
-    baseUrl = 'https://hivescans.com'
-    overrideVersionCode = 6
+    extName = 'Hive Scans'
+    extClass = '.HiveScans'
+    themePkg = 'iken'
+    baseUrl = 'https://hivetoon.com'
+    overrideVersionCode = 36
 }
 
 apply from: "$rootDir/common.gradle"

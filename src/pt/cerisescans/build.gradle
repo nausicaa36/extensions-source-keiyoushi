@@ -1,9 +1,9 @@
 ext {
     extName = 'Cerise Scan'
     extClass = '.CeriseScan'
-    themePkg = 'madara'
-    baseUrl = 'https://cerisescan.net'
-    overrideVersionCode = 8
+    themePkg = 'peachscan'
+    baseUrl = 'https://cerise.leitorweb.com'
+    overrideVersionCode = 41
     isNsfw = true
 }
 

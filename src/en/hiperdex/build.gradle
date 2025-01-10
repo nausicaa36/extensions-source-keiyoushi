@@ -2,9 +2,13 @@ ext {
     extName = 'Hiperdex'
     extClass = '.Hiperdex'
     themePkg = 'madara'
-    baseUrl = 'https://hiperdex.com'
-    overrideVersionCode = 11
+    baseUrl = 'https://hipertoon.com'
+    overrideVersionCode = 16
     isNsfw = true
 }
 
 apply from: "$rootDir/common.gradle"
+
+dependencies {
+    implementation project(':lib:randomua')
+}
